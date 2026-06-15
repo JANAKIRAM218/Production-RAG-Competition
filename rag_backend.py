@@ -17,10 +17,10 @@ from sentence_transformers import CrossEncoder
 load_dotenv(".env", override=True)
 
 CONFIG = {
-    "similarity_threshold": 1.2,
+    "similarity_threshold": 0.80,
     "k": 10,
     "fetch_k": 30,
-    "rerank_top_k": 5,
+    "rerank_top_k": 3,
     "embedding_model": "BAAI/bge-large-en-v1.5",
     "llm_model": "llama-3.3-70b-versatile"
 }
@@ -134,19 +134,18 @@ Answer:
 # ============================================================
 
 def is_in_scope(query):
+    # Normalize company names before retrieval
+    normalized_query = query.replace("Acrux Dynamics", "Zyro Dynamics").replace("Acrux", "Zyro")
     results = vectorstore.similarity_search_with_score(
-        query,
+        normalized_query,
         k=3
     )
 
     if not results:
         return False
 
-    avg_score = sum(
-        score for _, score in results
-    ) / len(results)
-
-    return avg_score < CONFIG["similarity_threshold"]
+    top_score = results[0][1]
+    return top_score < CONFIG["similarity_threshold"]
 
 # ============================================================
 
@@ -206,10 +205,7 @@ def get_sources(docs):
     sources = []
 
     for doc in docs:
-        source = (
-            f"{doc.metadata.get('source_file', 'Unknown')} "
-            f"(Page {doc.metadata.get('page', 0) + 1})"
-        )
+        source = doc.metadata.get('source_file', 'Unknown')
 
         if source not in seen:
             seen.add(source)
@@ -224,17 +220,20 @@ def get_sources(docs):
 # ============================================================
 
 def ask_rag(question):
-    if not is_in_scope(question):
+    # Normalize company names before retrieval
+    normalized_question = question.replace("Acrux Dynamics", "Zyro Dynamics").replace("Acrux", "Zyro")
+
+    if not is_in_scope(normalized_question):
         return {
             "answer": "I could not find this information in the Zyro Dynamics HR policies.",
             "sources": [],
             "docs": []
         }
 
-    docs = retriever.invoke(question)
+    docs = retriever.invoke(normalized_question)
 
     docs = rerank_documents(
-        question,
+        normalized_question,
         docs
     )
 
@@ -245,6 +244,16 @@ def ask_rag(question):
             "docs": []
         }
 
+    # Deduplicate retrieved chunks before sending context to the LLM
+    seen_content = set()
+    deduped_docs = []
+    for doc in docs:
+        content = doc.page_content.strip()
+        if content not in seen_content:
+            seen_content.add(content)
+            deduped_docs.append(doc)
+    docs = deduped_docs
+
     context = format_docs(docs)
 
     answer = (
@@ -254,9 +263,17 @@ def ask_rag(question):
     ).invoke(
         {
             "context": context,
-            "question": question
+            "question": normalized_question
         }
     )
+
+    refusal_text = "I could not find this information in the Zyro Dynamics HR policies."
+    if refusal_text in answer:
+        return {
+            "answer": refusal_text,
+            "sources": [],
+            "docs": []
+        }
 
     sources = get_sources(docs)
 
